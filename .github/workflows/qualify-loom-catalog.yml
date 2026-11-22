@@ -1,0 +1,75 @@
+name: qualify Loom catalog candidate
+
+on:
+  push:
+    branches: [qualification/oso-loom-catalog]
+    paths: [.github/workflows/qualify-loom-catalog.yml]
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      UPSTREAM_BASE: c5d560034150d66c23b2050b80d2462eb8d76a8d
+      CANDIDATE_SHA256: 711693891d77f8dbd28f8ccfd58a42b3141d6be092c08b6976fa2f2656564f29
+      CANDIDATE_B64: dmVyc2lvbjogNwpuYW1lOiBsb29tLWNsaWNraG91c2UKZGlzcGxheV9uYW1lOiBMb29tIChDbGlja0hvdXNlKQpkZXNjcmlwdGlvbjogTWVtb3J5LCBkb2N1bWVudCBzZWFyY2ggYW5kIGEgY29kZSBpbmRleCBmb3IgQUkgYWdlbnRzLgp3ZWJzaXRlczoKICAtIHVybDogaHR0cHM6Ly9jbGlja2hvdXNlLmdpdGh1Yi5pby9sb29tLwpnaXRodWI6CiAgLSB1cmw6IGh0dHBzOi8vZ2l0aHViLmNvbS9DbGlja0hvdXNlL2xvb20K
+    steps:
+      - name: Check out only the pinned upstream source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: opensource-observer/oss-directory
+          ref: c5d560034150d66c23b2050b80d2462eb8d76a8d
+          persist-credentials: false
+      - name: Install the required pinned Node runtime
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24.22.3"
+          package-manager-cache: false
+      - name: Install the pinned package manager outside the checkout
+        run: npm install --prefix "$RUNNER_TEMP/qualification-tools" --ignore-scripts --no-audit --no-fund pnpm@9.15.9
+      - name: Install the frozen dependency lock without lifecycle hooks
+        run: |
+          test "$(git rev-parse HEAD)" = "$UPSTREAM_BASE"
+          node "$RUNNER_TEMP/qualification-tools/node_modules/pnpm/bin/pnpm.cjs" install --frozen-lockfile --ignore-scripts --strict-peer-dependencies
+      - name: Validate and lint the unchanged upstream baseline
+        run: |
+          export PATH="$RUNNER_TEMP/qualification-tools/node_modules/.bin:$PATH"
+          pnpm run validate
+          pnpm lint
+      - name: Apply exactly the reviewed uncommitted candidate as test data
+        run: |
+          python3 - <<'PYCODE'
+          import base64, hashlib, os
+          from pathlib import Path
+          candidate = base64.b64decode(os.environ["CANDIDATE_B64"], validate=True)
+          assert hashlib.sha256(candidate).hexdigest() == os.environ["CANDIDATE_SHA256"]
+          destination = Path("data/projects/l/loom-clickhouse.yaml")
+          assert not destination.exists()
+          destination.write_bytes(candidate)
+          print("Candidate SHA256:", hashlib.sha256(destination.read_bytes()).hexdigest())
+          PYCODE
+      - name: Validate and lint the exact candidate against every existing entry
+        run: |
+          export PATH="$RUNNER_TEMP/qualification-tools/node_modules/.bin:$PATH"
+          pnpm run validate
+          pnpm lint
+      - name: Record qualification without publishing project data
+        run: |
+          python3 - <<'PYCODE'
+          import hashlib, os
+          from pathlib import Path
+          actual = hashlib.sha256(Path("data/projects/l/loom-clickhouse.yaml").read_bytes()).hexdigest()
+          assert actual == os.environ["CANDIDATE_SHA256"]
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as output:
+              output.write("Full validation and lint passed before and after the candidate.\n")
+              output.write("Upstream base: `" + os.environ["UPSTREAM_BASE"] + "`.\n")
+              output.write("Candidate SHA256: `" + actual + "`.\n")
+              output.write("The project entry remains uncommitted and unsubmitted; this run publishes no accepted data.\n")
+          PYCODE
